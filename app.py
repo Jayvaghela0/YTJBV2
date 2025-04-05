@@ -13,7 +13,7 @@ CORS(app)  # Allow all domains
 # Configurations
 DOWNLOAD_FOLDER = "downloads"
 COOKIES_FILE = "cookies.txt"
-BACKEND_URL = "https://ytjbv2.onrender.com"
+BACKEND_URL = "https://yt-downloader-3pl3.onrender.com"
 
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
@@ -44,6 +44,7 @@ def clip_video(input_path, output_path, start_time, end_time):
             '-i', input_path,
             '-to', str(end_time),
             '-c', 'copy',
+            '-an',  # This removes audio
             output_path,
             '-y'  # Overwrite without asking
         ]
@@ -53,8 +54,8 @@ def clip_video(input_path, output_path, start_time, end_time):
         print(f"FFmpeg error: {e}")
         return False
 
-@app.route("/get_formats", methods=["GET"])
-def get_formats():
+@app.route("/get_video_info", methods=["GET"])
+def get_video_info():
     url = request.args.get("url")
     if not url:
         return jsonify({"error": "URL required"}), 400
@@ -69,34 +70,10 @@ def get_formats():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        allowed_resolutions = {144, 240, 360, 480, 720, 1080, 1440}
-        allowed_ext = "mp4"
-        unique_formats = {}
-
-        for f in info.get("formats", []):
-            resolution = f.get("height")
-            ext = f.get("ext")
-            vcodec = f.get("vcodec")
-            acodec = f.get("acodec")
-
-            if resolution in allowed_resolutions and ext == allowed_ext and vcodec != "none":
-                if resolution not in unique_formats:
-                    unique_formats[resolution] = {
-                        "format_id": f.get("format_id"),
-                        "resolution": resolution,
-                        "ext": ext,
-                        "has_audio": acodec != "none"
-                    }
-
-        formats = list(unique_formats.values())
-
-        if not formats:
-            return jsonify({"error": "No supported formats found"}), 404
-
         return jsonify({
             "title": info["title"],
             "duration": info.get("duration"),
-            "formats": formats
+            "thumbnail": info.get("thumbnail")
         })
 
     except Exception as e:
@@ -105,35 +82,34 @@ def get_formats():
 @app.route("/download", methods=["GET"])
 def start_download():
     url = request.args.get("url")
-    format_id = request.args.get("format_id")
     start_time = request.args.get("start", "0")
     end_time = request.args.get("end", "")
 
-    if not url or not format_id:
-        return jsonify({"error": "URL and Format required"}), 400
+    if not url:
+        return jsonify({"error": "URL required"}), 400
 
     # Generate unique filename
-    video_hash = hashlib.md5((url + format_id + str(time.time())).encode()).hexdigest()
+    video_hash = hashlib.md5((url + str(time.time())).encode()).hexdigest()
     temp_path = os.path.join(DOWNLOAD_FOLDER, f"temp_{video_hash}.mp4")
     final_path = os.path.join(DOWNLOAD_FOLDER, f"{video_hash}.mp4")
 
     # Start download in new thread
     threading.Thread(
         target=download_and_process_video,
-        args=(url, format_id, video_hash, temp_path, final_path, start_time, end_time)
+        args=(url, video_hash, temp_path, final_path, start_time, end_time)
     ).start()
 
     return jsonify({
         "task_id": video_hash,
         "status": "started",
-        "message": "Download and processing started"
+        "message": "Download started"
     })
 
-def download_and_process_video(video_url, format_id, video_hash, temp_path, final_path, start_time, end_time):
+def download_and_process_video(video_url, video_hash, temp_path, final_path, start_time, end_time):
     try:
-        # Download full video first
+        # Download best video-only format in MP4
         ydl_opts = {
-            "format": format_id,
+            "format": "bestvideo[ext=mp4]",  # Video only, no audio
             "outtmpl": temp_path,
             "cookiefile": COOKIES_FILE,
             "http_headers": HEADERS,
