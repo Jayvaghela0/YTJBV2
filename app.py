@@ -60,16 +60,17 @@ class TaskManager:
 
     @staticmethod
     def cleanup_old_tasks():
-        with task_lock:
-            current_time = time.time()
-            to_delete = []
-            for task_id, task in download_tasks.items():
-                if current_time - task["last_updated"] > TASK_TIMEOUT:
-                    to_delete.append(task_id)
-            
-            for task_id in to_delete:
-                del download_tasks[task_id]
-                logger.info(f"Cleaned up old task: {task_id}")
+        while True:
+            with task_lock:
+                current_time = time.time()
+                to_delete = []
+                for task_id, task in download_tasks.items():
+                    if current_time - task["last_updated"] > TASK_TIMEOUT:
+                        to_delete.append(task_id)
+                for task_id in to_delete:
+                    del download_tasks[task_id]
+                    logger.info(f"Cleaned up old task: {task_id}")
+            time.sleep(CLEANUP_INTERVAL)
 
 def background_worker():
     while True:
@@ -105,7 +106,6 @@ def process_task(video_hash):
     final_path = os.path.join(DOWNLOAD_FOLDER, f"{video_hash}.mp4")
 
     try:
-        # Get parameters from task
         params = task.get("params", {})
         url = params.get("url")
         start_time = params.get("start", "0")
@@ -120,12 +120,13 @@ def process_task(video_hash):
                 })
 
         ydl_opts = {
-            "format": "bestvideo[ext=mp4]",
+            "format": "bv[ext=mp4]",  # bestvideo only, no audio
             "outtmpl": temp_path,
             "cookiefile": COOKIES_FILE,
             "http_headers": HEADERS,
             "noprogress": True,
-            "progress_hooks": [progress_hook]
+            "progress_hooks": [progress_hook],
+            "quiet": True
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -133,13 +134,14 @@ def process_task(video_hash):
 
         TaskManager.update_task(video_hash, {
             "status": "processing",
-            "message": "Processing video..."
+            "message": "Removing audio and clipping video (if needed)..."
         })
 
-        if start_time != "0" or end_time:
+        # If clipping or audio removal is needed
+        if start_time != "0" or end_time or True:
             if not end_time:
                 end_time = str(info.get("duration", 0))
-            
+
             if clip_video(temp_path, final_path, start_time, end_time):
                 os.remove(temp_path)
             else:
@@ -149,9 +151,9 @@ def process_task(video_hash):
 
         TaskManager.update_task(video_hash, {
             "status": "completed",
-            "title": info["title"],
+            "title": info.get("title", "Video"),
             "download_link": f"{BACKEND_URL}/file/{os.path.basename(final_path)}",
-            "message": "Download ready"
+            "message": "Video ready (no audio)"
         })
 
     except Exception as e:
@@ -159,7 +161,6 @@ def process_task(video_hash):
             "status": "failed",
             "error": str(e)
         })
-        # Cleanup files if they exist
         for path in [temp_path, final_path]:
             if os.path.exists(path):
                 try:
@@ -171,14 +172,14 @@ def process_task(video_hash):
 def clip_video(input_path, output_path, start_time, end_time):
     try:
         command = [
-            'ffmpeg',
-            '-ss', str(start_time),
-            '-i', input_path,
-            '-to', str(end_time),
-            '-c', 'copy',
-            '-an',  # Remove audio
+            "ffmpeg",
+            "-ss", str(start_time),
+            "-i", input_path,
+            "-to", str(end_time),
+            "-c:v", "copy",
+            "-an",  # Remove audio
             output_path,
-            '-y'
+            "-y"
         ]
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return True
@@ -215,7 +216,6 @@ def start_download():
 
     video_hash = hashlib.md5((url + str(time.time())).encode()).hexdigest()
     
-    # Store all parameters with the task
     TaskManager.create_task(video_hash)
     TaskManager.update_task(video_hash, {
         "params": {
@@ -241,15 +241,13 @@ def check_status(task_id):
             "error": "Task not found",
             "code": "not_found"
         }), 404
-    
-    # Include basic status even if task is not complete
+
     response = {
         "status": task.get("status", "unknown"),
         "message": task.get("message", ""),
         "progress": task.get("progress", 0)
     }
-    
-    # Only include these fields if task is completed
+
     if task["status"] == "completed":
         response.update({
             "title": task.get("title"),
@@ -257,7 +255,7 @@ def check_status(task_id):
         })
     elif task["status"] == "failed":
         response["error"] = task.get("error", "Unknown error")
-    
+
     return jsonify(response)
 
 @app.route("/file/<filename>")
@@ -270,16 +268,7 @@ def serve_file(filename):
     return jsonify({"error": "File not found"}), 404
 
 if __name__ == "__main__":
-    # Start background worker
-    worker_thread = threading.Thread(target=background_worker, daemon=True)
-    worker_thread.start()
-    
-    # Start cleanup thread
-    cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
-    cleanup_thread.start()
-    
-    # Start task cleanup scheduler
-    task_cleanup_thread = threading.Thread(target=TaskManager.cleanup_old_tasks, daemon=True)
-    task_cleanup_thread.start()
-    
+    threading.Thread(target=background_worker, daemon=True).start()
+    threading.Thread(target=cleanup_old_files, daemon=True).start()
+    threading.Thread(target=TaskManager.cleanup_old_tasks, daemon=True).start()
     app.run(debug=True, threaded=True)
