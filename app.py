@@ -13,7 +13,7 @@ CORS(app)  # Allow all domains
 # Configurations
 DOWNLOAD_FOLDER = "downloads"
 COOKIES_FILE = "cookies.txt"
-BACKEND_URL = "https://yt-downloader-3pl3.onrender.com"
+BACKEND_URL = "https://ytjbv2.onrender.com"
 
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
